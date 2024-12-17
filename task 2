@@ -1,0 +1,168 @@
+from flask import Flask, request, jsonify
+from flask_sqlalchemy import SQLAlchemy
+from flask_marshmallow import Marshmallow
+from werkzeug.security import generate_password_hash, check_password_hash
+import os
+
+# Initialize app
+app = Flask(__name__)
+
+# Database setup
+basedir = os.path.abspath(os.path.dirname(__file__))
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(basedir, 'marketplace.db')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+db = SQLAlchemy(app)
+ma = Marshmallow(app)
+
+# Models
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(100), unique=True, nullable=False)
+    email = db.Column(db.String(150), unique=True, nullable=False)
+    password = db.Column(db.String(200), nullable=False)
+    storefront = db.relationship('Storefront', backref='owner', lazy=True)
+
+    def set_password(self, password):
+        self.password = generate_password_hash(password)
+
+    def check_password(self, password):
+        return check_password_hash(self.password, password)
+
+class Storefront(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    products = db.relationship('Product', backref='storefront', lazy=True)
+
+class Product(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(150), nullable=False)
+    description = db.Column(db.Text, nullable=False)
+    price = db.Column(db.Float, nullable=False)
+    image_url = db.Column(db.String(200), nullable=True)
+    rating = db.Column(db.Float, default=0.0)
+    storefront_id = db.Column(db.Integer, db.ForeignKey('storefront.id'), nullable=False)
+
+class Review(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    content = db.Column(db.Text, nullable=False)
+    rating = db.Column(db.Integer, nullable=False)
+    product_id = db.Column(db.Integer, db.ForeignKey('product.id'), nullable=False)
+
+# Schemas
+class UserSchema(ma.SQLAlchemyAutoSchema):
+    class Meta:
+        model = User
+
+class StorefrontSchema(ma.SQLAlchemyAutoSchema):
+    class Meta:
+        model = Storefront
+
+class ProductSchema(ma.SQLAlchemyAutoSchema):
+    class Meta:
+        model = Product
+
+class ReviewSchema(ma.SQLAlchemyAutoSchema):
+    class Meta:
+        model = Review
+
+user_schema = UserSchema()
+storefront_schema = StorefrontSchema()
+product_schema = ProductSchema()
+review_schema = ReviewSchema()
+
+# Routes
+@app.route('/register', methods=['POST'])
+def register():
+    data = request.get_json()
+    username = data['username']
+    email = data['email']
+    password = data['password']
+
+    if User.query.filter_by(username=username).first():
+        return jsonify({"error": "Username already exists"}), 400
+
+    if User.query.filter_by(email=email).first():
+        return jsonify({"error": "Email already exists"}), 400
+
+    new_user = User(username=username, email=email)
+    new_user.set_password(password)
+    db.session.add(new_user)
+    db.session.commit()
+
+    return user_schema.jsonify(new_user)
+
+@app.route('/storefront', methods=['POST'])
+def create_storefront():
+    data = request.get_json()
+    name = data['name']
+    user_id = data['user_id']
+
+    if not User.query.get(user_id):
+        return jsonify({"error": "User does not exist"}), 404
+
+    new_storefront = Storefront(name=name, user_id=user_id)
+    db.session.add(new_storefront)
+    db.session.commit()
+
+    return storefront_schema.jsonify(new_storefront)
+
+@app.route('/products', methods=['POST'])
+def create_product():
+    data = request.get_json()
+    name = data['name']
+    description = data['description']
+    price = data['price']
+    image_url = data.get('image_url', '')
+    storefront_id = data['storefront_id']
+
+    if not Storefront.query.get(storefront_id):
+        return jsonify({"error": "Storefront does not exist"}), 404
+
+    new_product = Product(name=name, description=description, price=price, image_url=image_url, storefront_id=storefront_id)
+    db.session.add(new_product)
+    db.session.commit()
+
+    return product_schema.jsonify(new_product)
+
+@app.route('/products/<int:product_id>/reviews', methods=['POST'])
+def add_review(product_id):
+    data = request.get_json()
+    content = data['content']
+    rating = data['rating']
+
+    if not Product.query.get(product_id):
+        return jsonify({"error": "Product does not exist"}), 404
+
+    new_review = Review(content=content, rating=rating, product_id=product_id)
+    db.session.add(new_review)
+    db.session.commit()
+
+    return review_schema.jsonify(new_review)
+
+@app.route('/products', methods=['GET'])
+def get_products():
+    query_params = request.args
+    name_filter = query_params.get('name')
+    min_price = query_params.get('min_price', type=float)
+    max_price = query_params.get('max_price', type=float)
+
+    query = Product.query
+
+    if name_filter:
+        query = query.filter(Product.name.contains(name_filter))
+    if min_price is not None:
+        query = query.filter(Product.price >= min_price)
+    if max_price is not None:
+        query = query.filter(Product.price <= max_price)
+
+    products = query.all()
+    return jsonify(product_schema.dump(products, many=True))
+
+# Initialize the database
+with app.app_context():
+    db.create_all()
+
+if __name__ == '__main__':
+    app.run(debug=True)
